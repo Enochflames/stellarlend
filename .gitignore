@@ -118,3 +118,9 @@ oracle/stress-report/
 # Root differential-test artifacts
 junit.xml
 coverage/
+
+# Local devnet state (scripts/devnet/bootstrap.sh)
+.devnet/
+
+# SDK example/test build output
+packages/sdk/.examples-build/
