@@ -3,9 +3,12 @@
 // `alloc` is not in the extern prelude for a `no_std` crate. Declaring it at the
 // crate root makes `alloc::` paths usable from every module in the tree,
 // including the test-only property/invariant harnesses and the spec modules.
+// Gated to those builds: the contract itself never allocates through `alloc`, and an
+// unconditional declaration breaks the wasm build (no global allocator on wasm32v1-none).
+#[cfg(any(test, feature = "spec"))]
 extern crate alloc;
 
-use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, Val, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Val, Vec};
 
 mod borrow;
 mod calldata;
@@ -21,6 +24,7 @@ mod pause;
 mod reentrancy;
 mod risk_monitor;
 mod token_receiver;
+mod utilization_breaker;
 mod withdraw;
 
 // Property-based fuzzing and invariant-testing support. These modules existed in
@@ -62,6 +66,9 @@ use lazy::{LazyField, PoolStateView};
 use pause::{is_paused, set_pause as set_pause_logic, PauseType};
 use reentrancy::ReentrancyGuard;
 use token_receiver::receive as receive_logic;
+use utilization_breaker::{
+    UtilizationBreakerConfig, UtilizationBreakerError, UtilizationBreakerStatus,
+};
 
 mod views;
 use views::{
@@ -97,6 +104,8 @@ use insurance::{
 #[cfg(test)]
 mod borrow_test;
 #[cfg(test)]
+mod contract_upgrade_test;
+#[cfg(test)]
 mod data_store_test;
 #[cfg(test)]
 mod deposit_test;
@@ -120,6 +129,8 @@ mod spec;
 mod token_receiver_test;
 #[cfg(test)]
 mod upgrade_test;
+#[cfg(test)]
+mod utilization_breaker_test;
 #[cfg(test)]
 mod views_test;
 #[cfg(test)]
@@ -222,6 +233,52 @@ impl LendingContract {
         admin.require_auth();
         set_pause_logic(&env, admin, pause_type, paused);
         Ok(())
+    }
+
+    /// Replace this contract's code with an already-uploaded wasm (admin only).
+    ///
+    /// Storage is preserved; the new code must stay storage-compatible (see
+    /// `docs/runbooks/upgrade-and-migration.md`). Rolling back is the same call with the
+    /// previous wasm hash.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), BorrowError> {
+        let current_admin = get_borrow_admin(&env).ok_or(BorrowError::Unauthorized)?;
+        if admin != current_admin {
+            return Err(BorrowError::Unauthorized);
+        }
+        admin.require_auth();
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        events::ContractUpgradedEvent {
+            admin,
+            new_wasm_hash,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Install, change or disable the utilization circuit breaker (admin only).
+    ///
+    /// See [`utilization_breaker`] for semantics. Pass `enabled = false` to lift throttling.
+    pub fn set_utilization_breaker(
+        env: Env,
+        admin: Address,
+        config: UtilizationBreakerConfig,
+    ) -> Result<(), UtilizationBreakerError> {
+        utilization_breaker::set_config(&env, admin, config)
+    }
+
+    /// Clear a tripped utilization breaker without changing its configuration (admin only).
+    pub fn reset_utilization_breaker(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), UtilizationBreakerError> {
+        utilization_breaker::manual_reset(&env, admin)
+    }
+
+    /// Current breaker configuration, trip latch and protocol utilization.
+    pub fn get_utilization_breaker(env: Env) -> UtilizationBreakerStatus {
+        utilization_breaker::get_status(&env)
     }
 
     /// Repay borrowed assets
