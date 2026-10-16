@@ -63,7 +63,10 @@ use flash_loan::{
     FlashLoanError,
 };
 use lazy::{LazyField, PoolStateView};
-use pause::{is_paused, set_pause as set_pause_logic, PauseType};
+use pause::{is_paused, set_pause as set_pause_logic};
+/// Re-exported so integrators (and the `tests/` suites) can build `set_pause`
+/// and `guardian_pause` arguments.
+pub use pause::PauseType;
 use reentrancy::ReentrancyGuard;
 use token_receiver::receive as receive_logic;
 use utilization_breaker::{
@@ -642,11 +645,18 @@ impl LendingContract {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Initialize the insurance pool (admin only, call once).
+    ///
+    /// `admin` must be the protocol admin, so the insurance admin role cannot
+    /// be claimed by whoever calls this first after deployment.
     pub fn insurance_initialize(env: Env, admin: Address) -> Result<(), InsuranceError> {
+        let current_admin = get_borrow_admin(&env).ok_or(InsuranceError::Unauthorized)?;
+        if admin != current_admin {
+            return Err(InsuranceError::Unauthorized);
+        }
         insurance_initialize(&env, &admin)
     }
 
-    /// Contribute protocol fees to the insurance pool.
+    /// Contribute protocol fees to the insurance pool (insurance admin only).
     pub fn insurance_fund_pool(env: Env, amount: i128) -> Result<(), InsuranceError> {
         insurance_fund_pool(&env, amount)
     }
